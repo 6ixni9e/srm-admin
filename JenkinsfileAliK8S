@@ -1,0 +1,137 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'PROJECT_ENV', defaultValue: 'test', description: '项目部署环境')
+        string(name: 'REGISTRY_HOST', defaultValue: 'registry.cn-shanghai.aliyuncs.com', description: 'Harbor仓库地址')
+        string(name: 'REGISTRY_CREDS', defaultValue: 'jenkins-aliyunharbor-creds', description: 'Harbor仓库认证标识')
+        string(name: 'K8S_CONFIG_CREDS', defaultValue: 'jenkins-k8s-ali-creds', description: 'k8s连接认证标识')
+        string(name: 'K8S_REGISTRY_CONFIG_CREDS', defaultValue: 'jenkins-k8s-ali-registry-creds', description: 'k8s镜像仓库认证标识')
+        string(name: 'K8S_NAMESPACE', defaultValue: 'test', description: 'k8s名称空间')
+    }
+
+    environment {
+        PROJECT_ENV = "${params.PROJECT_ENV}"
+        REGISTRY_HOST = "${params.REGISTRY_HOST}"
+        REGISTRY_AUTH = credentials("${params.REGISTRY_CREDS}")
+        K8S_CONFIG = credentials("${params.K8S_CONFIG_CREDS}")
+        K8S_REGISTRY_CONFIG = credentials("${params.K8S_REGISTRY_CONFIG_CREDS}")
+        K8S_NAMESPACE = "${params.K8S_NAMESPACE}"
+        GIT_TAG = sh(returnStdout: true,script: 'git describe --tags').trim()
+        IMAGE_NAME = "srm-admin"
+        APP_NAME = "srm-admin"
+    }
+    stages {
+        stage('Maven Build') {
+            when { expression { env.GIT_TAG != null } }
+            agent {
+                docker {
+                    image 'harbor.db-inc.com/dbops/maven:3.6-jdk-8-v4'
+                    args '-v $HOME/.m2:/root/.m2'
+                }
+            }
+            steps {
+                sh "mvn clean install -P ${PROJECT_ENV} -Dfile.encoding=UTF-8 -Dmaven.test.skip=true"
+                stash includes: 'srm-admin/target/*.war', name: 'app'
+                archiveArtifacts 'srm-admin/target/*.war'
+            }
+        }
+        stage('Docker Build') {
+            when { allOf { expression { env.GIT_TAG != null } } }
+            agent any
+            steps {
+                unstash 'app'
+                sh "docker login -u ${REGISTRY_AUTH_USR} -p ${REGISTRY_AUTH_PSW} ${REGISTRY_HOST}"
+                sh "docker build --build-arg WAR_FILE=`ls srm-admin/target/*.war|cut -d'/' -f3` -t ${REGISTRY_HOST}/dbcom/srm-admin:${PROJECT_ENV}-${GIT_TAG} -f srm-admin/Dockerfile ."
+                sh "docker push ${REGISTRY_HOST}/dbcom/srm-admin:${PROJECT_ENV}-${GIT_TAG}"
+                sh "docker rmi ${REGISTRY_HOST}/dbcom/srm-admin:${PROJECT_ENV}-${GIT_TAG}"
+            }
+        }
+        stage('build app-yml') {
+            when { expression { env.GIT_TAG != null } }
+            steps {
+                sh "mkdir -p ~/.kube"
+                sh "echo ${K8S_CONFIG} | base64 -d > ~/.kube/config"
+                sh """
+cat > {K8S_NAMESPACE}-{APP_NAME}.yml <<EOF
+apiVersion: v1
+data:
+  .dockerconfigjson: {K8S_REGISTRY_CONFIG}
+kind: Secret
+metadata:
+  name: harborsecret
+  namespace: {K8S_NAMESPACE}
+type: kubernetes.io/dockerconfigjson
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  namespace: {K8S_NAMESPACE}
+  name: {APP_NAME}-deploy
+  labels:
+    app: {APP_NAME}
+spec:
+  revisionHistoryLimit: 10
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: {APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: {APP_NAME}
+    spec:
+      imagePullSecrets:
+        - name: harborsecret
+      containers:
+        - name: {APP_NAME}
+        image: {IMAGE_URL}:{IMAGE_TAG}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: httpport
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 25
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {APP_NAME}
+  namespace: {K8S_NAMESPACE}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080 
+  selector:
+    app: {APP_NAME}
+EOF
+                """
+            }
+        }
+        stage('deploy to k8s') {
+            steps {
+                sh 'kubectl apply -f {K8S_NAMESPACE}-{APP_NAME}.yml'
+            }
+        }
+    }
+}

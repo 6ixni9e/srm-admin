@@ -1,0 +1,65 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'PROJECT_ENV', defaultValue: 'test', description: '项目部署环境')
+        string(name: 'REGISTRY_HOST', defaultValue: 'harbor.db-inc.com', description: 'Harbor仓库地址')
+        string(name: 'REGISTRY_CREDS', defaultValue: 'jenkins-harbor-creds', description: 'Harbor仓库认证标识')
+        string(name: 'K8S_CONFIG_CREDS', defaultValue: 'jenkins-k8s-creds', description: 'k8s连接认证标识')
+        string(name: 'K8S_REGISTRY_CONFIG_CREDS', defaultValue: 'jenkins-k8s-registry-creds', description: 'k8s镜像仓库认证标识')
+        string(name: 'K8S_NAMESPACE', defaultValue: 'test', description: 'k8s名称空间')
+    }
+
+    environment {
+        PROJECT_ENV = "${params.PROJECT_ENV}"
+        REGISTRY_HOST = "${params.REGISTRY_HOST}"
+        REGISTRY_AUTH = credentials("${params.REGISTRY_CREDS}")
+        K8S_CONFIG = credentials("${params.K8S_CONFIG_CREDS}")
+        K8S_REGISTRY_CONFIG = credentials("${params.K8S_REGISTRY_CONFIG_CREDS}")
+        K8S_NAMESPACE = "${params.K8S_NAMESPACE}"
+        GIT_TAG = sh(returnStdout: true,script: 'git describe --tags').trim()
+        IMAGE_NAME = "srm-admin"
+        APP_NAME = "srm-admin"
+    }
+    stages {
+        stage('Maven Build') {
+            when { expression { env.GIT_TAG != null } }
+            agent {
+                docker {
+                    image 'harbor.db-inc.com/dbops/maven:3.6-jdk-8-v4'
+                    args '-v $HOME/.m2:/root/.m2'
+                }
+            }
+            steps {
+                sh "mvn clean install -P ${PROJECT_ENV} -Dfile.encoding=UTF-8 -Dmaven.test.skip=true"
+                stash includes: 'srm-admin/target/*.war', name: 'app'
+                archiveArtifacts 'srm-admin/target/*.war'
+            }
+        }
+        stage('Docker Build') {
+            when { allOf { expression { env.GIT_TAG != null } } }
+            agent any
+            steps {
+                unstash 'app'
+                sh "docker login -u ${REGISTRY_AUTH_USR} -p ${REGISTRY_AUTH_PSW} ${REGISTRY_HOST}"
+                sh "docker build --build-arg WAR_FILE=`ls srm-admin/target/*.war|cut -d'/' -f3` -t ${REGISTRY_HOST}/srm/srm-admin:${PROJECT_ENV}-${GIT_TAG} -f srm-admin/Dockerfile ."
+                sh "docker push ${REGISTRY_HOST}/srm/srm-admin:${PROJECT_ENV}-${GIT_TAG}"
+                sh "docker rmi ${REGISTRY_HOST}/srm/srm-admin:${PROJECT_ENV}-${GIT_TAG}"
+            }
+        }
+        stage('Deploy') {
+            when { expression { env.GIT_TAG != null } }
+            agent {
+                docker {
+                    image 'harbor.db-inc.com/dbops/kubectl-helm:v1.16.3'
+                }
+            }
+            steps {
+                sh "mkdir -p ~/.kube"
+                sh "echo ${K8S_CONFIG} | base64 -d > ~/.kube/config"
+                sh "sed -e 's#{IMAGE_URL}#${REGISTRY_HOST}/srm/${IMAGE_NAME}#g;s#{IMAGE_TAG}#${PROJECT_ENV}-${GIT_TAG}#g;s#{APP_NAME}#${APP_NAME}#g;s#{K8S_NAMESPACE}#${K8S_NAMESPACE}#g;s#{K8S_REGISTRY_CONFIG}#${K8S_REGISTRY_CONFIG}#g;s#{PROJECT_ENV}#${PROJECT_ENV}#g' srm-admin/k8s-app.tpl > srm-admin/k8s-app.yml"
+                sh "kubectl apply -f srm-admin/k8s-app.yml"
+            }
+        }
+    }
+}

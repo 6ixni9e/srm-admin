@@ -1,0 +1,51 @@
+spring:
+  redis:
+    database: 22
+    host: r-bp1ghgemm09r4jlrx1.redis.rds.aliyuncs.com #单节点模式
+    port: 6379
+    password: sd2@jhs722djke1411y3
+    timeout: 6000
+  rabbitmq:
+    host: 192.168.0.94
+    port: 5672
+    username: srm
+    password: Srm@2021
+    virtual-host: /srm
+
+dubbo:
+  application:
+    name: srm-admin
+    version: 1.0.0
+  registry:
+    protocol: zookeeper
+    address: 192.168.0.94:2181
+    check: false
+  consumer:
+    timeout: 15000
+    check: false
+    retries: 0
+    group: product
+
+sys:
+  config:
+    default-party-id: 1
+    #超级管理员，默认二级目录
+    sys-menu-ids[0]: 2
+    #跨域
+    allow-origins[0]: '*'
+    login-url: /sys/manager/login
+    #接口验权(true不验权)
+    test-environment: true
+    #session有效期(一个月)
+    session-timeout: 2592000
+    #单点登录开关
+    single-login-switch: false
+
+
+log:
+  level: INFO
+  ref: FILE  # FILE-文件，STDOUT-控制台
+
+logging:
+  level:
+    com.guojin.srm: DEBUG

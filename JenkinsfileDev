@@ -1,0 +1,66 @@
+pipeline {
+    agent any
+
+    environment {
+        PROJECT_ENV = 'dev'
+        REGISTRY_HOST = 'harbor.db-inc.com'
+        REGISTRY_AUTH = credentials("jenkins-harbor-creds")
+        TARGET_HOST = '172.16.100.47'
+        TARGET_PORT = '22'
+        TARGET_INNER_HOST = '172.16.100.47'
+        GIT_TAG = sh(returnStdout: true,script: 'git describe --tags').trim()
+    }
+
+    stages {
+        stage('Maven Build') {
+            when { expression { env.GIT_TAG != null } }
+            agent {
+                docker {
+                    image 'harbor.db-inc.com/dbops/maven:3.6-jdk-8-v3'
+                    args '-v $HOME/.m2:/root/.m2'
+                }
+            }
+            steps {
+                sh "mvn clean install -P ${PROJECT_ENV} -Dfile.encoding=UTF-8 -Dmaven.test.skip=true"
+                stash includes: 'srm-admin/target/*.war', name: 'app'
+                archiveArtifacts 'srm-admin/target/*.war'
+            }
+        }
+        stage('Docker Build') {
+            when { allOf { expression { env.GIT_TAG != null } } }
+            agent any
+            steps {
+                unstash 'app'
+                sh "docker login -u ${REGISTRY_AUTH_USR} -p ${REGISTRY_AUTH_PSW} ${REGISTRY_HOST}"
+                sh "docker build --build-arg WAR_FILE=`ls srm-admin/target/*.war|cut -d'/' -f3` -t ${REGISTRY_HOST}/inabei/srm-admin:${PROJECT_ENV}-${GIT_TAG} -f srm-admin/Dockerfile ."
+                sh "docker push ${REGISTRY_HOST}/inabei/srm-admin:${PROJECT_ENV}-${GIT_TAG}"
+                sh "docker rmi ${REGISTRY_HOST}/inabei/srm-admin:${PROJECT_ENV}-${GIT_TAG}"
+            }
+        }
+        stage('Deploy') {
+            when { expression { env.GIT_TAG != null } }
+            steps {
+                script {
+                    for (int i=0; i<TARGET_HOST.tokenize(',').size(); i++) {
+                        target_host = TARGET_HOST.tokenize(',')[i].trim()
+                        target_inner_host = TARGET_INNER_HOST.tokenize(',')[i].trim()
+                        target_port = TARGET_PORT.tokenize(',')[i].trim()
+                        sshagent(credentials:[]) {
+                             sh "ssh -o StrictHostKeyChecking=no root@${target_host} -p ${target_port} '\
+                                set +e; \
+                                 docker login -u ${REGISTRY_AUTH_USR} -p ${REGISTRY_AUTH_PSW} ${REGISTRY_HOST}; \
+                                 docker stop -t 30 srm-admin;docker rm -f srm-admin; \
+                                 docker run -itd --name srm-admin -v /etc/localtime:/etc/localtime -v /data/logs:/data/logs -v /usr/share/fonts:/usr/share/fonts/ --restart=on-failure:3 -p 5051:8080 ${REGISTRY_HOST}/inabei/srm-admin:${PROJECT_ENV}-${GIT_TAG}; \
+                                 check_status=\'000\';check_cnt=0;check_cnt_total=60; \
+                                 while [ \${check_status} -eq \'000\' -a \${check_cnt} -lt \${check_cnt_total} ];do let check_cnt+=1;echo 'Waiting srm-admin startup...';sleep 5; \
+                                 check_status=`curl -I -X GET --connect-timeout 1 -m 1 -o /dev/null -s -w %{http_code} \"http://${target_inner_host}:5051/\"`;done; \
+                                 if [ \${check_cnt} -lt \${check_cnt_total} ]; then echo 'Service Startup Successful!';else echo 'Service Startup Timeout!';fi; '"
+                        }
+                        echo "URL:  http://${target_inner_host}:5051/srmoss/  "
+                    }
+                }
+                echo '#### Docker Deploy Finished！ ####'
+            }
+        }
+    }
+}

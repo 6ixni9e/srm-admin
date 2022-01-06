@@ -1,0 +1,51 @@
+spring:
+  redis:
+    database: 6
+    host: 172.16.100.40 #单节点模式
+    port: 6379
+    password: redis_test123
+    timeout: 6000
+  rabbitmq:
+    host: 172.16.100.40
+    port: 5672
+    username: shared
+    password: shared123
+    virtual-host: /shared
+
+dubbo:
+  application:
+    name: srm-admin
+    version: 1.0.0
+  registry:
+    protocol: zookeeper
+    address: 172.16.100.40:2181
+    check: false
+  consumer:
+    timeout: 15000
+    check: false
+    retries: 0
+    group: test
+
+sys:
+  config:
+    default-party-id: 1
+    #超级管理员，默认二级目录
+    sys-menu-ids[0]: 2
+    #跨域
+    allow-origins[0]: '*'
+    login-url: /sys/manager/login
+    #接口验权(true不验权)
+    test-environment: true
+    #session有效期(一个月)
+    session-timeout: 2592000
+    #单点登录开关
+    single-login-switch: false
+
+
+log:
+  level: WARN
+  ref: FILE  # FILE-文件，STDOUT-控制台
+
+logging:
+  level:
+    com.guojin.srm: DEBUG
